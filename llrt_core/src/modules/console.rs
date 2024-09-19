@@ -13,7 +13,7 @@ use rquickjs::{
     atom::PredefinedAtom,
     function::This,
     module::{Declarations, Exports, ModuleDef},
-    object::Filter,
+    object::{Accessor, Filter},
     prelude::{Func, Rest},
     Array, Class, Coerced, Ctx, Function, Object, Result, Symbol, Type, Value,
 };
@@ -90,6 +90,16 @@ pub enum LogLevel {
     Fatal = 16,
 }
 
+trait PushByte {
+    fn push_byte(&mut self, byte: u8);
+}
+
+impl PushByte for String {
+    fn push_byte(&mut self, byte: u8) {
+        unsafe { self.as_mut_vec() }.push(byte);
+    }
+}
+
 impl LogLevel {
     fn to_string(&self) -> String {
         match self {
@@ -159,6 +169,7 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
     console.set("error", Func::from(log_error))?;
     console.set("warn", Func::from(log_warn))?;
     console.set("assert", Func::from(log_assert))?;
+    console.prop("__dimensions", Accessor::from(get_dimensions))?;
     console.set("__format", Func::from(|ctx, args| format(&ctx, args)))?;
 
     globals.set("console", console)?;
@@ -218,6 +229,21 @@ fn log<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<()> {
     log_std_out(&ctx, args, LogLevel::Info)
 }
 
+fn get_dimensions(ctx: Ctx<'_>) -> Result<Array<'_>> {
+    let array = Array::new(ctx.clone())?;
+    match terminal_size::terminal_size() {
+        Some((width, height)) => {
+            array.set(0, width.0)?;
+            array.set(1, height.0)?;
+        },
+        None => {
+            array.set(0, 0)?;
+            array.set(1, 0)?;
+        },
+    }
+    Ok(array)
+}
+
 fn clear() {
     let _ = stdout().write_all(b"\x1b[1;1H\x1b[0J");
 }
@@ -240,6 +266,11 @@ fn format_raw<'js>(
     Ok(())
 }
 
+fn format_raw_string<'js>(result: &mut String, value: String, options: &FormatOptions<'js>) {
+    let (color_enabled_mask, not_root_mask, not_root) = get_masks(options, 0);
+    format_raw_string_inner(result, value, not_root_mask, color_enabled_mask, not_root);
+}
+
 fn format_raw_inner<'js>(
     result: &mut String,
     value: Value<'js>,
@@ -249,9 +280,7 @@ fn format_raw_inner<'js>(
 ) -> Result<()> {
     let value_type = value.type_of();
 
-    let color_enabled_mask = bitmask(options.color);
-    let not_root_mask = bitmask(depth != 0);
-    let not_root = (depth != 0) as usize;
+    let (color_enabled_mask, not_root_mask, not_root) = get_masks(options, depth);
 
     match value_type {
         Type::Uninitialized | Type::Null => {
@@ -287,16 +316,19 @@ fn format_raw_inner<'js>(
             }));
         },
         Type::String => {
-            Color::GREEN.push(result, not_root_mask & color_enabled_mask);
-            result.push_str(SINGLE_QUOTE_LOOKUP[not_root]);
-            result.push_str(unsafe {
-                &value
-                    .as_string()
-                    .unwrap_unchecked()
-                    .to_string()
-                    .unwrap_unchecked()
-            });
-            result.push_str(SINGLE_QUOTE_LOOKUP[not_root]);
+            format_raw_string_inner(
+                result,
+                unsafe {
+                    value
+                        .as_string()
+                        .unwrap_unchecked()
+                        .to_string()
+                        .unwrap_unchecked()
+                },
+                not_root_mask,
+                color_enabled_mask,
+                not_root,
+            );
         },
         Type::Symbol => {
             Color::YELLOW.push(result, color_enabled_mask);
@@ -453,6 +485,27 @@ fn format_raw_inner<'js>(
     Ok(())
 }
 
+#[inline(always)]
+fn get_masks(options: &FormatOptions<'_>, depth: usize) -> (usize, usize, usize) {
+    let color_enabled_mask = bitmask(options.color);
+    let not_root_mask = bitmask(depth != 0);
+    let not_root = (depth != 0) as usize;
+    (color_enabled_mask, not_root_mask, not_root)
+}
+
+fn format_raw_string_inner(
+    result: &mut String,
+    value: String,
+    not_root_mask: usize,
+    color_enabled_mask: usize,
+    not_root: usize,
+) {
+    Color::GREEN.push(result, not_root_mask & color_enabled_mask);
+    result.push_str(SINGLE_QUOTE_LOOKUP[not_root]);
+    result.push_str(&value);
+    result.push_str(SINGLE_QUOTE_LOOKUP[not_root]);
+}
+
 fn write_object<'js>(
     result: &mut String,
     obj: &Object<'js>,
@@ -539,7 +592,14 @@ fn format_values_internal<'js>(
         if index == 0 && size > 1 {
             if let Some(str) = arg.as_string() {
                 let str = str.to_string()?;
+
+                //fast check for format any strings
+                if str.find('%').is_none() {
+                    format_raw_string(result, str, options);
+                    continue;
+                }
                 let bytes = str.as_bytes();
+                bytes.iter().position(|p| *p == b'%');
                 let mut i = 0;
                 let len = bytes.len();
                 let mut next_byte;
@@ -580,24 +640,26 @@ fn format_values_internal<'js>(
                                     continue;
                                 },
                                 b'%' => {
-                                    result.push(byte as char);
+                                    result.push_byte(byte);
+                                    result.push_byte(byte);
                                     continue;
                                 },
                                 _ => {
-                                    result.push(byte as char);
-                                    result.push(next_byte as char);
+                                    result.push_byte(byte);
+                                    result.push_byte(next_byte);
                                     continue;
                                 },
                             };
                             options.color = false;
+
                             format_raw(result, value, options)?;
                             options.object_filter = current_filter;
                             continue;
                         }
-                        result.push(byte as char);
-                        result.push(next_byte as char);
+                        result.push_byte(byte);
+                        result.push_byte(next_byte);
                     } else {
-                        result.push(byte as char);
+                        result.push_byte(byte);
                     }
 
                     i += 1;

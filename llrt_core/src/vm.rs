@@ -247,6 +247,7 @@ impl Loader for BinaryLoader {
 
             return load_bytecode_module(ctx, name, bytes);
         }
+
         let path = PathBuf::from(name);
         let mut bytes: &[u8] = &std::fs::read(path)?;
 
@@ -672,7 +673,7 @@ fn init(ctx: &Ctx<'_>, module_names: HashSet<&'static str>) -> Result<()> {
         }),
     )?;
 
-    () = Module::import(ctx, "@llrt/std")?.finish()?;
+    () = Module::import(ctx, "llrt:std")?.finish()?;
 
     Ok(())
 }
