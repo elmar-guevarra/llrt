@@ -10,12 +10,23 @@
  * @returns {Object} object - API Gateway Lambda Proxy Output Format
  *
  */
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+const ssmClient = new SSMClient();
 
 export const handler = async (event, context) => {
+
+  // GetParameter
+  const ssmCommand = new GetParameterCommand({
+      Name: '/artemis/amt/access-control/user/firm-id',
+      WithDecryption: false,
+  });
+  const ssmResponse = await ssmClient.send(ssmCommand);
+
   const response = {
     statusCode: 200,
     body: JSON.stringify({
       message: "hello world",
+      parameter: ssmResponse.Parameter?.Value
     }),
   };
 
